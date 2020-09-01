@@ -4,24 +4,24 @@ open Cubical
 open Bwd
 
 type dim = Dim.dim
-type cof = (dim, int) Cof.cof
+type cof = (dim, [`L of int | `G of Symbol.t]) Cof.cof
 
 (** A type code whose head constructor is stable under dimension substitution. *)
 type 'a stable_code =
   [ `Pi of 'a * 'a
-    (** Dependent product type *)
+  (** Dependent product type *)
 
   | `Sg of 'a * 'a
-    (** Dependent sum type *)
+  (** Dependent sum type *)
 
   | `Ext of int * 'a * [`Global of 'a] * 'a
-    (** Extension type *)
+  (** Extension type *)
 
   | `Nat
-    (** Natural numbers type *)
+  (** Natural numbers type *)
 
   | `Circle
-    (** The circle [S1]. *)
+  (** The circle [S1]. *)
 
   | `Univ
     (** A code for the universe (antinomous for now). *)
@@ -30,7 +30,7 @@ type 'a stable_code =
 (** A type code whose head constructor is {i not} stable under dimension substitution. *)
 type 'a unstable_code =
   [ `HCom of dim * dim * cof * 'a
-    (** Formal composite types *)
+  (** Formal composite types *)
 
   | `V of dim * 'a * 'a * 'a
     (** V types, for univalence *)
@@ -61,7 +61,6 @@ and con =
   | Base
   | Loop of dim
   | Pair of con * con
-  | GoalRet of con
   | SubIn of con
 
   | ElIn of con
@@ -85,13 +84,14 @@ and con =
 
   | Split of (cof * tm_clo) list
 
+  | LockedPrfIn of con
+
 and tp =
   | Sub of tp * cof * tm_clo
   | Univ
   | ElCut of cut
   | ElStable of con stable_code
   | ElUnstable of con unstable_code
-  | GoalTp of string option * tp
   | TpDim
   | TpCof
   | TpPrf of cof
@@ -100,6 +100,7 @@ and tp =
   | Sg of tp * Ident.t * tp_clo
   | Nat
   | Circle
+  | TpLockedPrf of cof
 
 (** A head is a variable (e.g. {!constructor:Global}, {!constructor:Var}), or it is some kind of unstable elimination form ({!constructor:Coe}, {!constructor:UnstableCut}). The geometry of {!type:cut}, {!type:hd}, {!type:unstable_frm} enables a very direct way to re-reduce a complex cut to whnf by following the unstable nodes to the root. *)
 and hd =
@@ -122,7 +123,6 @@ and frm =
   | KSnd
   | KNatElim of con * con * con
   | KCircleElim of con * con * con
-  | KGoalProj
 
   | KElOut
   (** The elimination form for the extension of a {i stable} type code only (see {!constructor:ElStable}). *)
@@ -134,3 +134,4 @@ and unstable_frm =
   | KCap of dim * dim * cof * con
   | KVProj of dim * con * con * con
   | KSubOut of cof * tm_clo
+  | KLockedPrfUnlock of tp * cof * con

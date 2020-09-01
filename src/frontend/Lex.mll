@@ -19,6 +19,8 @@ let make_table num elems =
 
 let keywords =
   make_table 0 [
+    ("locked", LOCKED);
+    ("unlock", UNLOCK);
     ("zero", ZERO);
     ("suc", SUC);
     ("nat", NAT);
@@ -34,6 +36,7 @@ let keywords =
     ("unfold", UNFOLD);
     ("generalize", GENERALIZE);
     ("def", DEF);
+    ("axiom", AXIOM);
     ("normalize", NORMALIZE);
     ("print", PRINT);
     ("quit", QUIT);
@@ -114,6 +117,8 @@ rule token = parse
     { PIPE }
   | ','
     { COMMA }
+  | ";"
+    { SEMI }
   | '*'
     { TIMES }
   | "×"
@@ -130,6 +135,8 @@ rule token = parse
     { JOIN }
   | "="
     { EQUALS }
+  | ":="
+    { COLON_EQUALS }
   | "->"
     { RIGHT_ARROW }
   | "=>"

@@ -10,13 +10,11 @@ open Tactic
 type ('a, 'b) quantifier = 'a -> Ident.t * (var -> 'b) -> 'b
 
 module Hole : sig
+  val run_chk_and_print_state : string option -> Chk.tac -> Chk.tac
+  val run_syn_and_print_state : string option -> Syn.tac -> Syn.tac
   val unleash_hole : string option -> Chk.tac
   val unleash_tp_hole : string option -> Tp.tac
   val unleash_syn_hole : string option -> Syn.tac
-end
-
-module Goal : sig
-  val formation : string option -> Tp.tac -> Tp.tac
 end
 
 module Dim : sig
@@ -40,6 +38,12 @@ end
 module Prf : sig
   val formation : Chk.tac -> Tp.tac
   val intro : Chk.tac
+end
+
+module LockedPrf : sig
+  val formation : Chk.tac -> Tp.tac
+  val intro : Chk.tac
+  val unlock : Syn.tac -> Chk.tac -> Chk.tac
 end
 
 module Univ : sig

@@ -22,9 +22,6 @@ type t =
   | Fst of t
   | Snd of t
 
-  | GoalRet of t
-  | GoalProj of t
-
   | Coe of t * t * t * t
   | HCom of t * t * t * t * t
   | Com of t * t * t * t * t
@@ -59,11 +56,13 @@ type t =
   | ESub of sub * t
   (** Explicit substition *)
 
+  | LockedPrfIn of t
+  | LockedPrfUnlock of {tp : tp; cof : t; prf : t; bdy : t}
+
 and tp =
   | Univ
   | El of t
   | TpVar of int
-  | GoalTp of string option * tp
   | TpDim
   | TpCof
   | TpPrf of t
@@ -74,6 +73,7 @@ and tp =
   | Nat
   | Circle
   | TpESub of sub * tp
+  | TpLockedPrf of t
 
 (** The language of substitions from {{:https://arxiv.org/abs/1102.2405} Abel, Coquand, and Pagano}. *)
 and sub =
@@ -91,4 +91,3 @@ and sub =
 
   | SbP
   (** The projection from a extended context [Γ.A → Γ]. *)
-

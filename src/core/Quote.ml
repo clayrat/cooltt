@@ -256,6 +256,10 @@ let rec quote_con (tp : D.tp) con =
         S.CofSplit (List.combine tphis tms)
     end
 
+  | D.TpLockedPrf phi, D.LockedPrfIn prf ->
+    let+ prf = quote_con (D.TpPrf phi) prf in
+    S.LockedPrfIn prf
+
   | _ ->
     Format.eprintf "bad: %a / %a@." D.pp_tp tp D.pp_con con;
     throw @@ QuotationError (Error.IllTypedQuotationProblem (tp, con))
@@ -377,9 +381,6 @@ and quote_tp (tp : D.tp) =
   | D.ElCut cut ->
     let+ tm = quote_cut cut in
     S.El tm
-  | D.GoalTp (lbl, tp) ->
-    let+ tp = quote_tp tp in
-    S.GoalTp (lbl, tp)
   | D.Sub (tp, phi, cl) ->
     let* ttp = quote_tp tp in
     let+ tphi = quote_cof phi
@@ -426,6 +427,9 @@ and quote_tp (tp : D.tp) =
     let+ tphis = MU.map (fun (phi , _) -> quote_cof phi) branches
     and+ tps = MU.map branch_body branches in
     S.TpCofSplit (List.combine tphis tps)
+  | D.TpLockedPrf phi ->
+    let+ tphi = quote_cof phi in
+    S.TpLockedPrf tphi
 
 and quote_hd =
   function
@@ -484,6 +488,15 @@ and quote_unstable_cut cut ufrm =
     in
     let+ tv = quote_cut cut in
     S.VProj (tr, tpcode, tcode, t_pequiv, tv)
+  | D.KLockedPrfUnlock (tp, phi, bdy) ->
+    let+ tp = quote_tp tp
+    and+ prf = quote_cut cut
+    and+ cof = quote_cof phi
+    and+ bdy =
+      let bdy_tp = D.Pi (D.TpPrf phi, `Anon, D.const_tp_clo tp) in
+      quote_con bdy_tp bdy
+    in
+    S.LockedPrfUnlock {tp; cof; prf; bdy}
 
 and quote_dim d : S.t quote =
   quote_con D.TpDim @@
@@ -492,9 +505,11 @@ and quote_dim d : S.t quote =
 and quote_cof phi =
   let rec go =
     function
-    | Cof.Var lvl ->
+    | Cof.Var (`L lvl) ->
       let+ ix = quote_var lvl in
       S.Var ix
+    | Cof.Var (`G sym) ->
+      ret @@ S.Global sym
     | Cof.Cof phi ->
       match phi with
       | Cof.Eq (r, s) ->
@@ -575,7 +590,5 @@ and quote_frm tm =
   | D.KAp (tp, con) ->
     let+ targ = quote_con tp con in
     S.Ap (tm, targ)
-  | D.KGoalProj ->
-    ret @@ S.GoalProj tm
   | D.KElOut ->
     ret @@ S.ElOut tm

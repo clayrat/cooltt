@@ -68,6 +68,22 @@ let el_in m : _ m =
   let+ tm = m in
   S.ElIn tm
 
+let tp_locked_prf mphi : _ m =
+  let+ phi = mphi in
+  S.TpLockedPrf phi
+
+let locked_prf_in mprf : _ m =
+  let+ prf = mprf in
+  S.LockedPrfIn prf
+
+let locked_prf_unlock mtp ~cof ~prf ~bdy =
+  let+ tp = mtp
+  and+ cof = cof
+  and+ prf = prf
+  and+ bdy = bdy in
+  S.LockedPrfUnlock {tp; cof; prf; bdy}
+
+
 let el_out m : _ m =
   let+ tm = m in
   S.ElOut tm
@@ -76,10 +92,6 @@ let lam ?(ident = `Anon) mbdy : _ m =
   scope @@ fun var ->
   let+ bdy = mbdy var in
   S.Lam (ident, bdy)
-
-let goal_proj m =
-  let+ t = m in
-  S.GoalProj t
 
 let rec ap m0 ms : _ m =
   match ms with

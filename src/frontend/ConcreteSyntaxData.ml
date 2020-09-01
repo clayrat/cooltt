@@ -39,7 +39,7 @@ and con_ =
   | Fst of con
   | Snd of con
   | Type
-  | Hole of string option
+  | Hole of string option * con option
   | Underscore
   | Unfold of Ident.t list * con
   | Generalize of Ident.t * con
@@ -64,6 +64,8 @@ and con_ =
   | V of con * con * con * con
   | VProj of con
   | Cap of con
+  | Locked of con
+  | Unlock of con * con
 [@@deriving show]
 
 and case = pat * con
@@ -76,7 +78,7 @@ and pat_arg = [`Simple of Ident.t | `Inductive of Ident.t * Ident.t]
 [@@deriving show]
 
 type decl =
-  | Def of {name : Ident.t; args : cell list; def : con; tp : con}
+  | Def of {name : Ident.t; args : cell list; def : con option; tp : con}
   | Print of Ident.t node
   | NormalizeTerm of con
   | Quit

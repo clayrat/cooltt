@@ -43,6 +43,7 @@ sig
   val dim : tac
   val cof : tac
   val prf : T.Chk.tac -> tac
+  val locked_prf : T.Chk.tac -> tac
 
   val code : T.Chk.tac -> tac
 end =
@@ -102,6 +103,7 @@ struct
   let dim = Tp R.Dim.formation
   let cof = Tp R.Cof.formation
   let prf tac = Tp (R.Prf.formation tac)
+  let locked_prf tac = Tp (R.LockedPrf.formation tac)
   let code tac = Code tac
 end
 
@@ -129,6 +131,9 @@ let rec cool_chk_tp : CS.con -> CoolTp.tac =
     let tac_cof = chk_tm @@ CS.{node = CS.Lam (idents, {node = CS.Join (List.map fst cases); info = None}); info = None} in
     let tac_bdry = chk_tm @@ CS.{node = CS.Lam (idents @ [`Anon], {node = CS.CofSplit cases; info = None}); info = None} in
     CoolTp.ext n tac_fam tac_cof tac_bdry
+  | CS.Locked cphi ->
+    let tac_phi = chk_tm cphi in
+    CoolTp.locked_prf tac_phi
   | _ -> CoolTp.code @@ chk_tm con
 
 
@@ -165,20 +170,25 @@ and chk_tm : CS.con -> T.Chk.tac =
   T.Chk.update_span con.info @@
   Tactics.intro_subtypes @@
   match con.node with
-  | CS.Hole name ->
-    R.Hole.unleash_hole name
+  | CS.Hole (name, ocon) ->
+    Refiner.Hole.run_chk_and_print_state name @@
+    Option.fold ~none:(Refiner.Hole.unleash_hole name) ~some:chk_tm ocon
 
   | CS.Unfold (idents, c) ->
     (* TODO: move to a trusted rule *)
     T.Chk.brule @@
     fun goal ->
-      unfold idents @@ T.Chk.brun (chk_tm c) goal
+    unfold idents @@ T.Chk.brun (chk_tm c) goal
 
   | CS.Generalize (ident, c) ->
     R.Structural.generalize ident (chk_tm c)
 
   | CS.Lam ([], body) ->
     chk_tm body
+
+  | CS.Unlock (prf, bdy) ->
+    R.LockedPrf.unlock (syn_tm prf) @@
+    R.Pi.intro @@ fun _ -> chk_tm bdy
 
   | _ ->
     Tactics.intro_implicit_connectives @@
@@ -294,8 +304,9 @@ and syn_tm : CS.con -> T.Syn.tac =
     T.Syn.update_span con.info @@
     Tactics.elim_implicit_connectives @@
     match con.node with
-    | CS.Hole name ->
-      R.Hole.unleash_syn_hole name
+    | CS.Hole (name, ocon) ->
+      Refiner.Hole.run_syn_and_print_state name @@
+      Option.fold ~none:(Refiner.Hole.unleash_syn_hole name) ~some:syn_tm ocon
     | CS.Var id ->
       R.Structural.lookup_var id
     | CS.DeBruijnLevel lvl ->

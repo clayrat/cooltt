@@ -81,6 +81,8 @@ let rec equate_tp (tp0 : D.tp) (tp1 : D.tp) =
   | D.TpDim, D.TpDim | D.TpCof, D.TpCof -> ret ()
   | D.TpPrf phi0, D.TpPrf phi1 ->
     equate_cof phi0 phi1
+  | D.TpLockedPrf phi0, D.TpLockedPrf phi1 ->
+    equate_cof phi0 phi1
   | D.Pi (base0, _, fam0), D.Pi (base1, _, fam1)
   | D.Sg (base0, _, fam0), D.Sg (base1, _, fam1) ->
     let* () = equate_tp base0 base1 in
@@ -99,8 +101,6 @@ let rec equate_tp (tp0 : D.tp) (tp1 : D.tp) =
   | D.Circle, D.Circle
   | D.Univ, D.Univ ->
     ret ()
-  | D.GoalTp (lbl0, tp0), D.GoalTp (lbl1, tp1) when lbl0 = lbl1 ->
-    equate_tp tp0 tp1
   | D.ElStable code0, D.ElStable code1 ->
     equate_stable_code D.Univ code0 code1
   | D.ElCut cut0, D.ElCut cut1 ->
@@ -194,10 +194,6 @@ and equate_con tp con0 con1 =
     let* snd0 = lift_cmp @@ do_snd con0 in
     let* snd1 = lift_cmp @@ do_snd con1 in
     equate_con fib snd0 snd1
-  | D.GoalTp (_, tp), _, _ ->
-    let* con0 = lift_cmp @@ do_goal_proj con0 in
-    let* con1 = lift_cmp @@ do_goal_proj con1 in
-    equate_con tp con0 con1
   | D.Sub (tp, _phi, _), _, _ ->
     let* out0 = lift_cmp @@ do_sub_out con0 in
     let* out1 = lift_cmp @@ do_sub_out con1 in
@@ -247,6 +243,7 @@ and equate_con tp con0 con1 =
     let* bdy0' = fix_body bdy0 in
     let* bdy1' = fix_body bdy1 in
     equate_hcom (D.StableCode `Circle, r0, s0, phi0, bdy0') (D.StableCode `Circle, r1, s1, phi1, bdy1')
+
   | univ, D.StableCode code0, D.StableCode code1 ->
     equate_stable_code univ code0 code1
 
@@ -270,9 +267,22 @@ and equate_con tp con0 con1 =
     let* tp_proj = lift_cmp @@ do_el code in
     equate_con tp_proj proj0 proj1
 
+  | D.TpLockedPrf _, D.LockedPrfIn _, D.LockedPrfIn _->
+    ret ()
+
+  | D.TpLockedPrf phi, _, _ ->
+    begin
+      CmpM.test_sequent [] phi |> lift_cmp |>> function
+      | false ->
+        conv_err @@ ExpectedSequentTrue ([], phi)
+      | true ->
+        ret ()
+    end
+
   | _ ->
     Format.eprintf "failed: %a, %a@." D.pp_con con0 D.pp_con con1;
     conv_err @@ ExpectedConEq (tp, con0, con1)
+
 
 (* Invariant: cut0, cut1 are whnf *)
 and equate_cut cut0 cut1 =
@@ -348,8 +358,6 @@ and equate_frm k0 k1 =
       TB.el @@ TB.ap mot [TB.loop x]
     in
     equate_con loop_tp loop_case0 loop_case1
-  | D.KGoalProj, D.KGoalProj ->
-    ret ()
   | D.KElOut, D.KElOut ->
     ret ()
   | _ ->
@@ -421,6 +429,12 @@ and equate_unstable_cut (cut0, ufrm0) (cut1, ufrm1) =
   | D.KVProj (r0, pcode0, code0, pequiv0), D.KVProj (r1, pcode1, code1, pequiv1) ->
     let* () = equate_v_data (r0, pcode0, code0, pequiv0) (r1, pcode1, code1, pequiv1) in
     equate_cut cut0 cut1
+  | D.KLockedPrfUnlock (tp0, phi0, bdy0), D.KLockedPrfUnlock (tp1, phi1, bdy1) ->
+    let* () = equate_cut cut0 cut1 in
+    let* () = equate_tp tp0 tp1 in
+    let* () = equate_cof phi0 phi1 in
+    let bdy_tp = D.Pi (D.TpPrf phi0, `Anon, D.const_tp_clo tp0) in
+    equate_con bdy_tp bdy0 bdy1
   | _ ->
     conv_err @@ HeadMismatch (D.UnstableCut (cut0, ufrm0), D.UnstableCut (cut1, ufrm1))
 
