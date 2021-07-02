@@ -1,3 +1,5 @@
+open CodeUnit
+
 module D = Domain
 module S = Syntax
 module St = RefineState
@@ -21,13 +23,18 @@ let resolve id =
   | Some ix -> ret @@ `Local ix
   | None ->
     let* st = get in
-    match St.resolve_global id st with
+    match St.resolve_global (Env.current_unit_id env) id st with
     | Some sym -> ret @@ `Global sym
     | None -> ret `Unbound
 
+let get_current_unit_id =
+  let* env = read in
+  ret @@ Env.current_unit_id env
+
 let add_global id tp con =
   let* st = get in
-  let sym, st' = St.add_global id tp con st in
+  let* current_unit_id = get_current_unit_id in
+  let sym, st' = St.add_global current_unit_id id tp con st in
   let* () = set st' in
   ret sym
 
@@ -50,11 +57,35 @@ let get_local ix =
   | tp -> ret tp
   | exception exn -> throw exn
 
+let with_code_unit lib unit_id (action : 'a m) =
+  let* () = modify (St.init_unit unit_id) in
+  scope (fun _ -> Env.set_current_unit_id unit_id (Env.init lib)) action
+
+let get_current_lib =
+  let* env = read in
+  ret @@ Env.current_lib env
+
+let get_current_unit =
+  let* st = get in
+  let* current_unit_id = get_current_unit_id in
+  ret @@ St.get_unit current_unit_id st
+
+let add_import modifier code_unit =
+  let* current_unit_id = get_current_unit_id in
+  modify (St.add_import current_unit_id modifier code_unit)
+
+let get_import path =
+  let* st = get in
+  ret @@ St.get_import path st
+
 let quote_con tp con =
   lift_qu @@ Qu.quote_con tp con
 
 let quote_tp tp =
   lift_qu @@ Qu.quote_tp tp
+
+let quote_sign sign =
+  lift_qu @@ Qu.quote_sign sign
 
 let quote_cut cut =
   lift_qu @@ Qu.quote_cut cut
@@ -105,6 +136,14 @@ let expected_connective conn tp =
   with_pp @@ fun ppenv ->
   let* ttp = quote_tp tp in
   refine_err @@ Err.ExpectedConnective (conn, ppenv, ttp)
+
+let expected_field sign con lbl =
+  with_pp @@ fun ppenv ->
+  let* tsign = quote_sign sign in
+  refine_err @@ Err.ExpectedField (ppenv, tsign, con, lbl)
+
+let field_names_mismatch ~expected ~actual =
+  refine_err @@ Err.FieldNameMismatches (expected, actual)
 
 let abstract nm tp k =
   let rho env =

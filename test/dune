@@ -1,0 +1,20 @@
+(executables
+ (names test)
+ (libraries cooltt.frontend))
+
+(rule
+ (target test.output)
+ (deps
+  (glob_files ./*.cooltt)
+  (glob_files ./cooltt-lib))
+ (action (with-stdout-to %{target} (run ./test.exe))))
+
+(rule
+ (alias runtest)
+ (action
+  (diff test.expected test.output)))
+
+(rule
+ (alias test-display)
+ (deps (universe))
+ (action (cat test.output)))

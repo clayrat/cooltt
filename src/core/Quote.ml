@@ -1,3 +1,9 @@
+open Basis
+open Cubical
+open Monads
+
+open CodeUnit
+
 module S = Syntax
 module D = Domain
 module Sem = Semantics
@@ -7,9 +13,6 @@ exception CCHM
 exception CJHM
 exception CFHM
 
-open Basis
-open Cubical
-open Monads
 
 module Error =
 struct
@@ -31,6 +34,15 @@ let contractum_or x =
   function
   | `Done -> x
   | `Reduce y -> y
+
+let guess_bound_name : D.con -> Ident.t =
+  function
+  | D.Lam (x, _) -> x
+  | D.BindSym (_x, _) -> `Anon
+  | D.Cut {tp = D.Pi (_, x, _); _} -> x
+  | D.Cut {tp = D.TpSplit (_branch :: _); _} -> `Anon (* XXX what should we do here? *)
+  | D.Split (_branch :: _) -> `Anon (* XXX what should we do here? *)
+  | _ -> `Anon
 
 let rec quote_con (tp : D.tp) con =
   QuM.abort_if_inconsistent (ret S.tm_abort) @@
@@ -91,6 +103,10 @@ let rec quote_con (tp : D.tp) con =
     let+ tfst = quote_con base fst
     and+ tsnd = quote_con fib snd in
     S.Pair (tfst, tsnd)
+
+  | D.Signature sign, _ ->
+    let+ tfields = quote_fields sign con in
+    S.Struct tfields
 
   | D.Sub (tp, _phi, _clo), _ ->
     let+ tout =
@@ -182,7 +198,7 @@ let rec quote_con (tp : D.tp) con =
     and+ ts = quote_dim s
     and+ tphi = quote_cof phi
     and+ tsides =
-      quote_lam (D.TpPrf phi) @@ fun _prf ->
+      quote_lam ~ident:`Anon (D.TpPrf phi) @@ fun _prf ->
       quote_con tp con
     and+ tcap =
       let* bdy_r = lift_cmp @@ do_ap2 bdy (D.dim_to_con r) D.Prf in
@@ -193,7 +209,7 @@ let rec quote_con (tp : D.tp) con =
 
   | D.ElUnstable (`V (r, pcode, code, pequiv)) as tp, _ ->
     begin
-      lift_cmp (CmpM.test_sequent [] (Cof.boundary r)) |>> function
+      lift_cmp (CmpM.test_sequent [] (Cof.boundary ~dim0:Dim.Dim0 ~dim1:Dim.Dim1 r)) |>> function
       | true ->
         let branch phi : (S.t * S.t) m =
           let* tphi = quote_cof phi in
@@ -207,7 +223,7 @@ let rec quote_con (tp : D.tp) con =
       | false ->
         let+ tr = quote_dim r
         and+ part =
-          quote_lam (D.TpPrf (Cof.eq r Dim.Dim0)) @@ fun _ ->
+          quote_lam ~ident:`Anon (D.TpPrf (Cof.eq r Dim.Dim0)) @@ fun _ ->
           let* pcode_fib = lift_cmp @@ do_ap pcode D.Prf in
           let* tp = lift_cmp @@ do_el pcode_fib in
           quote_con tp con
@@ -264,6 +280,30 @@ let rec quote_con (tp : D.tp) con =
     Format.eprintf "bad: %a / %a@." D.pp_tp tp D.pp_con con;
     throw @@ QuotationError (Error.IllTypedQuotationProblem (tp, con))
 
+and quote_fields (sign : D.sign) con : (string list * S.t) list m =
+  match sign with
+  | D.Field (lbl, tp, sign_clo) ->
+    let* fcon = lift_cmp @@ do_proj con lbl in
+    let* sign = lift_cmp @@ inst_sign_clo sign_clo fcon in
+    let* tfield = quote_con tp fcon in
+    let+ tfields = quote_fields sign con in
+    (lbl, tfield) :: tfields
+  | D.Empty -> ret []
+
+and quote_stable_field_code univ args (lbl, fam) =
+  (* See [NOTE: Sig Code Quantifiers] for more details *)
+  let rec go vars =
+    function
+    | [] -> quote_con univ @<< lift_cmp @@ do_aps fam vars
+    | (lbl, arg) :: args ->
+      (* The 'do_aps' here instantiates the argument type families so that we can handle
+         the telescopic nature of fields correctly. *)
+      let* elarg = lift_cmp @@ CmpM.bind (do_aps arg vars) do_el in
+      quote_lam ~ident:(`User lbl) elarg @@ fun var -> go (vars @ [var]) args
+  in
+  let+ tfam = go [] args in
+  (lbl, tfam)
+
 and quote_stable_code univ =
   function
   | `Nat ->
@@ -276,24 +316,30 @@ and quote_stable_code univ =
     ret S.CodeUniv
 
   | `Pi (base, fam) ->
+    let ident = guess_bound_name fam in
     let+ tbase = quote_con univ base
     and+ tfam =
       let* elbase = lift_cmp @@ do_el base in
-      quote_lam elbase @@ fun var ->
+      quote_lam ~ident elbase @@ fun var ->
       quote_con univ @<<
       lift_cmp @@ do_ap fam var
     in
     S.CodePi (tbase, tfam)
 
   | `Sg (base, fam) ->
+    let ident = guess_bound_name fam in
     let+ tbase = quote_con univ base
     and+ tfam =
       let* elbase = lift_cmp @@ do_el base in
-      quote_lam elbase @@ fun var ->
+      quote_lam ~ident elbase @@ fun var ->
       quote_con univ @<<
       lift_cmp @@ do_ap fam var
     in
     S.CodeSg (tbase, tfam)
+  | `Signature fields ->
+    let+ tfields = MU.map_accum_left_m (quote_stable_field_code univ) fields
+    in
+    S.CodeSignature tfields
 
   | `Ext (n, code, `Global phi, bdry) ->
     let+ tphi =
@@ -321,7 +367,7 @@ and quote_global_con tp (`Global con) =
   let+ tm = quote_con tp con in
   `Global tm
 
-and quote_lam ?(ident = `Anon) tp mbdy =
+and quote_lam ~ident tp mbdy =
   let+ bdy = bind_var tp mbdy in
   S.Lam (ident, bdy)
 
@@ -345,9 +391,10 @@ and quote_hcom code r s phi bdy =
   let* ts = quote_dim s in
   let* tphi = quote_cof phi in
   let+ tbdy =
-    quote_lam D.TpDim @@ fun i ->
+    let ident_i = guess_bound_name bdy in
+    quote_lam ~ident:ident_i D.TpDim @@ fun i ->
     let* i_dim = lift_cmp @@ con_to_dim i in
-    quote_lam (D.TpPrf (Cof.join [Cof.eq r i_dim; phi])) @@ fun prf ->
+    quote_lam ~ident:`Anon (D.TpPrf (Cof.join [Cof.eq r i_dim; phi])) @@ fun prf ->
     let* body = lift_cmp @@ do_ap2 bdy i prf in
     let* tp = lift_cmp @@ do_el code in
     quote_con tp body
@@ -358,6 +405,16 @@ and quote_tp_clo base fam =
   bind_var base @@ fun var ->
   let* tp = lift_cmp @@ inst_tp_clo fam var in
   quote_tp tp
+
+and quote_sign : D.sign -> S.sign m =
+  function
+  | Field (ident, field, clo) ->
+    let* tfield = quote_tp field in
+    bind_var field @@ fun var ->
+    let* fields = lift_cmp @@ inst_sign_clo clo var in
+    let+ tfields = quote_sign fields in
+    (ident, tfield) :: tfields
+  | Empty -> ret []
 
 and quote_tp (tp : D.tp) =
   let* veil = read_veil in
@@ -373,6 +430,9 @@ and quote_tp (tp : D.tp) =
     let* tbase = quote_tp base in
     let+ tfam = quote_tp_clo base fam in
     S.Sg (tbase, ident, tfam)
+  | D.Signature sign ->
+    let+ sign = quote_sign sign in
+    S.Signature sign
   | D.Univ ->
     ret S.Univ
   | D.ElStable code ->
@@ -505,11 +565,9 @@ and quote_dim d : S.t quote =
 and quote_cof phi =
   let rec go =
     function
-    | Cof.Var (`L lvl) ->
+    | Cof.Var lvl ->
       let+ ix = quote_var lvl in
       S.Var ix
-    | Cof.Var (`G sym) ->
-      ret @@ S.Global sym
     | Cof.Cof phi ->
       match phi with
       | Cof.Eq (r, s) ->
@@ -587,6 +645,8 @@ and quote_frm tm =
     ret @@ S.Fst tm
   | D.KSnd ->
     ret @@ S.Snd tm
+  | D.KProj lbl ->
+    ret @@ S.Proj (tm, lbl)
   | D.KAp (tp, con) ->
     let+ targ = quote_con tp con in
     S.Ap (tm, targ)

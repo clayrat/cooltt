@@ -43,6 +43,7 @@
 
 
 (require 'cl-lib)
+(require 'compile)
 
 (defgroup cooltt nil "cooltt" :prefix 'cooltt :group 'languages)
 
@@ -87,28 +88,28 @@
 
 (defvar cooltt-mode-syntax-table
   (let ((table (make-syntax-table)))
-    (modify-syntax-entry ?- "w" table)
     (modify-syntax-entry ?_ "w" table)
     (modify-syntax-entry ?= "w" table)
     (modify-syntax-entry ?' "w" table)
     (modify-syntax-entry ?/  "_ 123" table)
+    (modify-syntax-entry ?- ". 12" table)
     (modify-syntax-entry ?\n ">" table)
     table)
   "Syntax table for cooltt.")
 
 (defconst cooltt-declaration-keywords
-  '("def" "let" "normalize" "quit")
+  '("def" "let" "normalize" "quit" "import")
   "Declaration keywords.")
 
 
 (defconst cooltt-expression-keywords
-  '("zero" "suc" "nat" "in" "fst" "snd" "elim" "unfold" "type" "dim" "cof" "sub" "pathd" "coe" "hcom" "com" "hfill")
+  '("zero" "suc" "nat" "in" "fst" "snd" "elim" "unfold" "type" "dim" "cof" "sub" "pathd" "coe" "hcom" "com" "hfill" "sig" "struct")
   "Expression keywords.")
 
 
 
 (defconst cooltt-expression-symbols
-  '("=>" "|" "[" "," "*" "×" ":" "=" "_" "𝕀" "𝔽" "∂" "∧" "∨" "→" "]" "->" "#t" "#f" "\\/" "/\\")
+  '("=>" "|" "[" "," "*" "×" ":" "=" "_" "𝕀" "𝔽" "∂" "∧" "∨" "→" "!" "]" "->" "#t" "#f" "\\/" "/\\")
   "Expression symbols.")
 
 (defvar cooltt-mode-font-lock-keywords
@@ -123,6 +124,23 @@
     (,(regexp-opt cooltt-expression-keywords 'words) 0 'cooltt-expression-keyword-face)
     (,(regexp-opt cooltt-expression-symbols 'nil) 0 'cooltt-expression-symbol-face)
     ))
+
+
+(defconst cooltt-compilation-error-regexp-alist
+  `((,(concat
+       "^\\([^ \n]+\\):"             ;; Filename
+       "\\([0-9]+\\)\\.\\([0-9]+\\)" ;; Starting Line/Column
+       "-"
+       "\\([0-9]+\\)\\.\\([0-9]+\\)" ;; Ending Line/Column
+       " \\(\\[Info\\]\\)?")         ;; Match forward if we see [Info]
+     1 (2 . 4) (3 . 5) (nil . 6)))
+  "Regexps used for matching cooltt compilation messages.
+See `compilation-error-regexp-alist' for semantics.")
+
+(define-compilation-mode cooltt-compilation-mode "Cooltt"
+  "Cooltt specific `compilation-mode' derivative."
+  (setq-local compilation-error-regexp-alist
+              cooltt-compilation-error-regexp-alist))
 
 (defconst cooltt--compilation-buffer-name
   "*cooltt*"
@@ -147,7 +165,7 @@
                  (compilation-buffer-name-function
                   'cooltt--compilation-buffer-name-function)
                  (default-directory dir))
-            (compile command)))
+            (compilation-start command 'cooltt-compilation-mode nil t)))
       (error "Buffer has no file name"))))
 
 ;;;###autoload

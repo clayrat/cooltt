@@ -1,5 +1,8 @@
 open Core
 open Basis
+open Bwd
+
+open CodeUnit
 
 module CS = ConcreteSyntax
 module S = Syntax
@@ -12,6 +15,7 @@ module T = Tactic
 module Sem = Semantics
 
 open Monad.Notation (RM)
+module MU = Monad.Util (RM)
 
 let rec unfold idents k =
   match idents with
@@ -28,6 +32,15 @@ let rec unfold idents k =
       let span = Env.location env in
       RM.throw @@ Err.RefineError (Err.UnboundVariable ident, span)
 
+(* Account for the lambda-bound signature field dependencies.
+    See [NOTE: Sig Code Quantifiers] for more info. *)
+let bind_sig_tacs (tacs : (string list * T.Chk.tac) list) : (string list * T.Chk.tac) list =
+  let bind_tac lbls (lbl, tac) =
+    let tac = Bwd.fold_right (fun lbl tac -> R.Pi.intro ~ident:(`User lbl) (fun _ -> tac)) lbls tac in
+    Snoc (lbls, lbl) , (lbl, tac)
+  in
+  snd @@ ListUtil.map_accum_left bind_tac Emp tacs
+
 module CoolTp :
 sig
   include T.Tactic
@@ -35,6 +48,7 @@ sig
   val as_tp : tac -> T.Tp.tac
   val pi : tac -> Ident.t -> tac -> tac
   val sg : tac -> Ident.t -> tac -> tac
+  val signature : (string list * tac) list -> tac
   val sub : tac -> T.Chk.tac -> T.Chk.tac -> tac
   val ext : int -> T.Chk.tac -> T.Chk.tac -> T.Chk.tac -> tac
   val nat : tac
@@ -67,6 +81,12 @@ struct
     | Tp tac -> tac
     | Code tac -> R.El.formation tac
 
+  let as_codes =
+    ListUtil.map_opt @@
+    function
+    | (_, Tp _) -> None
+    | (lbl, Code tac) -> Some (lbl, tac)
+
   let pi (tac_base : tac) (ident : Ident.t) (tac_fam : tac) : tac =
     match tac_base, tac_fam with
     | Code tac_base, Code tac_fam ->
@@ -87,6 +107,16 @@ struct
       let tac_base = as_tp tac_base in
       let tac_fam = as_tp tac_fam in
       let tac = R.Sg.formation tac_base (ident, fun _ -> tac_fam) in
+      Tp tac
+
+  let signature (tacs : (string list * tac) list) : tac =
+    match (as_codes tacs) with
+    | Some tacs ->
+      let tac = R.Univ.signature (bind_sig_tacs tacs) in
+      Code tac
+    | None ->
+      let tele = List.fold_right (fun (nm, tac) tele -> R.Bind (nm, as_tp tac, fun _ -> tele)) tacs R.Done in
+      let tac = R.Signature.formation tele in
       Tp tac
 
   let sub tac_tp tac_phi tac_pel : tac =
@@ -114,13 +144,16 @@ let rec cool_chk_tp : CS.con -> CoolTp.tac =
   | CS.Pi ([], body) ->
     cool_chk_tp body
   | CS.Pi (CS.Cell cell :: cells, body) ->
-    CoolTp.pi (cool_chk_tp cell.tp) cell.name @@
+    List.fold_right (CoolTp.pi (cool_chk_tp cell.tp)) cell.names @@
     cool_chk_tp {con with node = CS.Pi (cells, body)}
   | CS.Sg ([], body) ->
     cool_chk_tp body
   | CS.Sg (CS.Cell cell :: cells, body) ->
-    CoolTp.sg (cool_chk_tp cell.tp) cell.name @@
+    List.fold_right (CoolTp.sg (cool_chk_tp cell.tp)) cell.names @@
     cool_chk_tp {con with node = CS.Sg (cells, body)}
+  | CS.Signature cells ->
+    let tacs = List.map (fun (CS.Field field) -> (field.lbl, cool_chk_tp field.tp)) cells in
+    CoolTp.signature tacs
   | CS.Dim -> CoolTp.dim
   | CS.Cof -> CoolTp.cof
   | CS.Prf phi -> CoolTp.prf @@ chk_tm phi
@@ -146,9 +179,9 @@ and chk_tp_in_tele (args : CS.cell list) (con : CS.con) : T.Tp.tac =
   let rec loop args =
     match args with
     | [] -> cool_chk_tp con
-    | CS.Cell {name; tp} :: args ->
+    | CS.Cell {names; tp} :: args ->
       CoolTp.update_span tp.info @@
-      CoolTp.pi (cool_chk_tp tp) name @@
+      List.fold_right (CoolTp.pi (cool_chk_tp tp)) names @@
       loop args
   in
   CoolTp.as_tp @@ loop args
@@ -157,11 +190,16 @@ and chk_tm_in_tele (args : CS.cell list) (con : CS.con) : T.Chk.tac =
   let rec loop args =
     match args with
     | [] -> chk_tm con
-    | CS.Cell {name; tp} :: args ->
-      T.Chk.update_span tp.info @@
-      Tactics.intro_implicit_connectives @@
-      R.Pi.intro ~ident:name @@ fun _ ->
-      loop args
+    | CS.Cell {names; tp} :: args ->
+      (* XXX a mechanical translation was done to support multiple names
+         in a cell. Someone should rethink and refactor the code. *)
+      List.fold_right
+        (fun name body ->
+           T.Chk.update_span tp.info @@
+           Tactics.intro_implicit_connectives @@
+           R.Pi.intro ~ident:name @@ fun _ -> body)
+        names
+        (loop args)
   in
   loop args
 
@@ -170,10 +208,8 @@ and chk_tm : CS.con -> T.Chk.tac =
   T.Chk.update_span con.info @@
   Tactics.intro_subtypes @@
   match con.node with
-  | CS.Hole (name, ocon) ->
-    Refiner.Hole.run_chk_and_print_state name @@
-    Option.fold ~none:(Refiner.Hole.unleash_hole name) ~some:chk_tm ocon
-
+  | CS.Hole (name, None) -> Refiner.Hole.unleash_hole name
+  | CS.Hole (name, Some con) -> Refiner.Probe.probe_chk name @@ chk_tm con
   | CS.Unfold (idents, c) ->
     (* TODO: move to a trusted rule *)
     T.Chk.brule @@
@@ -223,6 +259,10 @@ and chk_tm : CS.con -> T.Chk.tac =
           RM.expected_connective `Sg tp
       end
 
+    | CS.Struct fields ->
+      let tacs = List.map (fun (CS.Field field) -> (field.lbl, chk_tm field.tp)) fields in
+      R.Signature.intro tacs
+
     | CS.Suc c ->
       R.Nat.suc (chk_tm c)
 
@@ -245,15 +285,20 @@ and chk_tm : CS.con -> T.Chk.tac =
       R.Univ.univ
 
     | CS.Pi (cells, body) ->
-      let tac (CS.Cell cell) = cell.name, chk_tm cell.tp in
-      let tacs = cells |> List.map tac in
+      let tac (CS.Cell cell) = let tp = chk_tm cell.tp in List.map (fun name -> name, tp) cell.names in
+      let tacs = cells |> List.concat_map tac in
       let quant base (nm, fam) = R.Univ.pi base (R.Pi.intro ~ident:nm fam) in
       Tactics.tac_nary_quantifier quant tacs @@ chk_tm body
 
     | CS.Sg (cells, body) ->
-      let tacs = cells |> List.map @@ fun (CS.Cell cell) -> cell.name, chk_tm cell.tp in
+      let tac (CS.Cell cell) = let tp = chk_tm cell.tp in List.map (fun name -> name, tp) cell.names in
+      let tacs = cells |> List.concat_map tac in
       let quant base (nm, fam) = R.Univ.sg base (R.Pi.intro ~ident:nm fam) in
       Tactics.tac_nary_quantifier quant tacs @@ chk_tm body
+
+    | CS.Signature fields ->
+      let tacs = bind_sig_tacs @@ List.map (fun (CS.Field field) -> field.lbl, chk_tm field.tp) fields in
+      R.Univ.signature tacs
 
     | CS.V (r, pcode, code, pequiv) ->
       R.Univ.code_v (chk_tm r) (chk_tm pcode) (chk_tm code) (chk_tm pequiv)
@@ -304,9 +349,8 @@ and syn_tm : CS.con -> T.Syn.tac =
     T.Syn.update_span con.info @@
     Tactics.elim_implicit_connectives @@
     match con.node with
-    | CS.Hole (name, ocon) ->
-      Refiner.Hole.run_syn_and_print_state name @@
-      Option.fold ~none:(Refiner.Hole.unleash_syn_hole name) ~some:syn_tm ocon
+    | CS.Hole (name, None) -> Refiner.Hole.unleash_syn_hole name
+    | CS.Hole (name, Some con) -> Refiner.Probe.probe_syn name @@ syn_tm con
     | CS.Var id ->
       R.Structural.lookup_var id
     | CS.DeBruijnLevel lvl ->
@@ -326,6 +370,8 @@ and syn_tm : CS.con -> T.Syn.tac =
       R.Sg.pi1 @@ syn_tm t
     | CS.Snd t ->
       R.Sg.pi2 @@ syn_tm t
+    | CS.Proj (t, ident) ->
+      R.Signature.proj (syn_tm t) ident
     | CS.VProj t ->
       R.ElV.elim @@ syn_tm t
     | CS.Cap t ->
@@ -374,3 +420,21 @@ and chk_cases cases =
 
 and chk_case (pat, c) =
   pat, chk_tm c
+
+let rec modifier_ (con : CS.con) =
+  let open Yuujinchou.Pattern in
+  RM.update_span con.info @@
+  match con.node with
+  | CS.ModAny -> RM.ret any
+  | CS.ModOnly path -> RM.ret @@ only_subtree path
+  | CS.ModRename (path1, path2) -> RM.ret @@ renaming_subtree path1 path2
+  | CS.ModNone -> RM.ret none
+  | CS.ModExcept path -> RM.ret @@ except_subtree path
+  | CS.ModSeq l -> seq <@> MU.map modifier_ l
+  | CS.ModUnion l -> union <@> MU.map modifier_ l
+  | CS.ModInSubtree (p, m) -> in_subtree p <@> modifier_ m
+  | CS.ModPrint lbl -> RM.ret @@ hook @@ `Print lbl
+  | _ -> RM.throw @@ ElabError.ElabError (ElabError.ExpectedSynthesizableTerm con.node, con.info)
+
+let modifier con =
+  Option.fold ~none:(RM.ret Yuujinchou.Pattern.any) ~some:modifier_ con

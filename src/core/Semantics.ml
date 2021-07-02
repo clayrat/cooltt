@@ -1,3 +1,9 @@
+open Basis
+open Cubical
+open Bwd
+
+open CodeUnit
+
 module S = Syntax
 module D = Domain
 
@@ -5,10 +11,6 @@ exception Todo
 exception CJHM
 exception CFHM
 exception CCHM
-
-open Basis
-open Cubical
-open Bwd
 
 exception NbeFailed of string
 
@@ -26,6 +28,10 @@ type whnf_style = [`UnfoldNone | `UnfoldAll | `Veil of Veil.t]
 
 let cut_frm ~tp ~cut frm =
   D.Cut {tp; cut = D.push frm cut}
+
+
+let equal_path p1 p2 =
+  List.equal String.equal p1 p2
 
 
 let get_local i =
@@ -85,7 +91,7 @@ sig
   val extend : gen -> D.cof -> D.cof CM.m
 
   (** Quantifier elimination *)
-  val forall : Symbol.t -> D.cof -> D.cof CM.m
+  val forall : DimProbe.t -> D.cof -> D.cof CM.m
 end =
 struct
   open CM
@@ -111,7 +117,7 @@ struct
     loop
 
   let forall sym =
-    let i = Dim.DimSym sym in
+    let i = Dim.DimProbe sym in
     extend @@
     function
     | `CofEq (r, s) ->
@@ -149,8 +155,7 @@ and con_to_cof =
     whnf_inspect_con ~style:`UnfoldAll con |>>
     function
     | D.Cof cof -> cof_con_to_cof cof
-    | D.Cut {cut = D.Var l, []; _} -> ret @@ Cof.var (`L l)
-    | D.Cut {cut = D.Global sym, []; _} -> ret @@ Cof.var (`G sym)
+    | D.Cut {cut = D.Var l, []; _} -> ret @@ Cof.var l
     | _ -> throw @@ NbeFailed "con_to_cof"
 
 and con_to_dim =
@@ -160,18 +165,18 @@ and con_to_dim =
     function
     | D.Dim0 -> ret Dim.Dim0
     | D.Dim1 -> ret Dim.Dim1
+    | D.DimProbe x -> ret @@ Dim.DimProbe x
     | D.Cut {cut = Var l, []; _} -> ret @@ Dim.DimVar l
-    | D.Cut {cut = Global sym, []; _} -> ret @@ Dim.DimSym sym
     | con ->
       Format.eprintf "bad: %a@." D.pp_con con;
       throw @@ NbeFailed "con_to_dim"
 
 
-and subst_con : D.dim -> Symbol.t -> D.con -> D.con CM.m =
+and subst_con : D.dim -> DimProbe.t -> D.con -> D.con CM.m =
   fun r x con ->
   CM.ret @@ D.LetSym (r, x, con)
 
-and push_subst_con : D.dim -> Symbol.t -> D.con -> D.con CM.m =
+and push_subst_con : D.dim -> DimProbe.t -> D.con -> D.con CM.m =
   fun r x ->
   let open CM in
   function
@@ -189,7 +194,7 @@ and push_subst_con : D.dim -> Symbol.t -> D.con -> D.con CM.m =
     D.Lam (ident, clo)
   | BindSym (y, con) ->
     begin
-      test_sequent [] (Cof.eq (Dim.DimSym x) (Dim.DimSym y)) |>>
+      test_sequent [] (Cof.eq (Dim.DimProbe x) (Dim.DimProbe y)) |>>
       function
       | true ->
         ret @@ D.BindSym (y, con)
@@ -201,6 +206,9 @@ and push_subst_con : D.dim -> Symbol.t -> D.con -> D.con CM.m =
     let+ con0 = subst_con r x con0
     and+ con1 = subst_con r x con1 in
     D.Pair (con0, con1)
+  | D.Struct fields ->
+    let+ fields = MU.map (MU.second (subst_con r x)) fields in
+    D.Struct fields
   | D.StableCode code ->
     let+ code = subst_stable_code r x code in
     D.StableCode code
@@ -251,9 +259,9 @@ and push_subst_con : D.dim -> Symbol.t -> D.con -> D.con CM.m =
     and+ pivot = subst_con r x pivot
     and+ base = subst_con r x base in
     D.VIn (s, equiv, pivot, base)
-  | D.Cut {tp = _; cut = (D.Global y, [])} as con ->
+  | D.DimProbe y as con ->
     begin
-      test_sequent [] (Cof.eq (Dim.DimSym x) (Dim.DimSym y)) |>>
+      test_sequent [] (Cof.eq (Dim.DimProbe x) (Dim.DimProbe y)) |>>
       function
       | true ->
         ret @@ D.dim_to_con r
@@ -276,36 +284,52 @@ and push_subst_con : D.dim -> Symbol.t -> D.con -> D.con CM.m =
     let+ prf = subst_con r x prf in
     D.LockedPrfIn prf
 
-and subst_dim : D.dim -> Symbol.t -> D.dim -> D.dim CM.m =
+and subst_dim : D.dim -> DimProbe.t -> D.dim -> D.dim CM.m =
   fun r x s ->
   let open CM in
   con_to_dim @<< push_subst_con r x @@ D.dim_to_con s
 
-and subst_cof : D.dim -> Symbol.t -> D.cof -> D.cof CM.m =
+and subst_cof : D.dim -> DimProbe.t -> D.cof -> D.cof CM.m =
   fun r x phi ->
   let open CM in
   con_to_cof @<< push_subst_con r x @@ D.cof_to_con phi
 
-and subst_clo : D.dim -> Symbol.t -> D.tm_clo -> D.tm_clo CM.m =
+and subst_clo : D.dim -> DimProbe.t -> D.tm_clo -> D.tm_clo CM.m =
   fun r x (Clo (tm, env)) ->
   let open CM in
   let+ env = subst_env r x env in
   D.Clo (tm, env)
 
-and subst_tp_clo : D.dim -> Symbol.t -> D.tp_clo -> D.tp_clo CM.m =
+and subst_tp_clo : D.dim -> DimProbe.t -> D.tp_clo -> D.tp_clo CM.m =
   fun r x (Clo (tp, env)) ->
   let open CM in
   let+ env = subst_env r x env in
   D.Clo (tp, env)
 
-and subst_env : D.dim -> Symbol.t -> D.env -> D.env CM.m =
+and subst_sign_clo : D.dim -> DimProbe.t -> D.sign_clo -> D.sign_clo CM.m =
+  fun r x (Clo (sign, env)) ->
+  let open CM in
+  let+ env = subst_env r x env in
+  D.Clo (sign, env)
+
+and subst_env : D.dim -> DimProbe.t -> D.env -> D.env CM.m =
   fun r x {tpenv; conenv} ->
   let open CM in
   let+ tpenv = MU.map_bwd (subst_tp r x) tpenv
   and+ conenv = MU.map_bwd (subst_con r x) conenv in
   D.{tpenv; conenv}
 
-and subst_tp : D.dim -> Symbol.t -> D.tp -> D.tp CM.m =
+and subst_sign : D.dim -> DimProbe.t -> D.sign -> D.sign CM.m =
+  fun r x ->
+  let open CM in
+  function
+  | D.Field (ident, tp, clo) ->
+    let+ tp = subst_tp r x tp
+    and+ clo = subst_sign_clo r x clo in
+    D.Field (ident, tp, clo)
+  | D.Empty -> ret D.Empty
+
+and subst_tp : D.dim -> DimProbe.t -> D.tp -> D.tp CM.m =
   fun r x ->
   let open CM in
   function
@@ -317,6 +341,9 @@ and subst_tp : D.dim -> Symbol.t -> D.tp -> D.tp CM.m =
     let+ base = subst_tp r x base
     and+ fam = subst_tp_clo r x fam in
     D.Sg (base, ident, fam)
+  | D.Signature sign ->
+    let+ sign = subst_sign r x sign in
+    D.Signature sign
   | D.Sub (base, phi, clo) ->
     let+ base = subst_tp r x base
     and+ phi = subst_cof r x phi
@@ -356,7 +383,7 @@ and subst_tp : D.dim -> Symbol.t -> D.tp -> D.tp CM.m =
     let+ phi = subst_cof r x phi in
     D.TpLockedPrf phi
 
-and subst_stable_code : D.dim -> Symbol.t -> D.con D.stable_code -> D.con D.stable_code CM.m =
+and subst_stable_code : D.dim -> DimProbe.t -> D.con D.stable_code -> D.con D.stable_code CM.m =
   fun r x ->
   let open CM in
   function
@@ -368,6 +395,9 @@ and subst_stable_code : D.dim -> Symbol.t -> D.con D.stable_code -> D.con D.stab
     let+ con0 = subst_con r x con0
     and+ con1 = subst_con r x con1 in
     `Sg (con0, con1)
+  | `Signature fields ->
+    let+ fields = MU.map (MU.second (subst_con r x)) fields in
+    `Signature fields
   | `Ext (n, code, `Global cof, con) ->
     let+ code = subst_con r x code
     and+ con = subst_con r x con in
@@ -375,14 +405,14 @@ and subst_stable_code : D.dim -> Symbol.t -> D.con D.stable_code -> D.con D.stab
   | `Nat | `Circle | `Univ as code ->
     ret code
 
-and subst_cut : D.dim -> Symbol.t -> D.cut -> D.cut CM.m =
+and subst_cut : D.dim -> DimProbe.t -> D.cut -> D.cut CM.m =
   fun r x (hd, sp) ->
   let open CM in
   let+ hd = subst_hd r x hd
   and+ sp = subst_sp r x sp in
   (hd, sp)
 
-and subst_hd : D.dim -> Symbol.t -> D.hd -> D.hd CM.m =
+and subst_hd : D.dim -> DimProbe.t -> D.hd -> D.hd CM.m =
   fun r x ->
   let open CM in
   function
@@ -398,7 +428,7 @@ and subst_hd : D.dim -> Symbol.t -> D.hd -> D.hd CM.m =
     and+ ufrm = subst_unstable_frm r x ufrm in
     D.UnstableCut(cut, ufrm)
 
-and subst_unstable_frm : D.dim -> Symbol.t -> D.unstable_frm -> D.unstable_frm CM.m =
+and subst_unstable_frm : D.dim -> DimProbe.t -> D.unstable_frm -> D.unstable_frm CM.m =
   fun r x ->
   let open CM in
   function
@@ -431,11 +461,11 @@ and subst_unstable_frm : D.dim -> Symbol.t -> D.unstable_frm -> D.unstable_frm C
     D.KLockedPrfUnlock (tp, phi, con)
 
 
-and subst_frm : D.dim -> Symbol.t -> D.frm -> D.frm CM.m =
+and subst_frm : D.dim -> DimProbe.t -> D.frm -> D.frm CM.m =
   fun r x ->
   let open CM in
   function
-  | D.KFst | D.KSnd | D.KElOut as frm -> ret frm
+  | D.KFst | D.KSnd | D.KElOut | D.KProj _ as frm -> ret frm
   | D.KAp (tp, arg) ->
     let+ tp = subst_tp r x tp
     and+ arg = subst_con r x arg in
@@ -452,9 +482,18 @@ and subst_frm : D.dim -> Symbol.t -> D.frm -> D.frm CM.m =
     D.KCircleElim (con0, con1, con2)
 
 
-and subst_sp : D.dim -> Symbol.t -> D.frm list -> D.frm list CM.m =
+and subst_sp : D.dim -> DimProbe.t -> D.frm list -> D.frm list CM.m =
   fun r x ->
   CM.MU.map @@ subst_frm r x
+
+and eval_sign : S.sign -> D.sign EvM.m =
+  let open EvM in
+  function
+  | [] -> ret D.Empty
+  | (ident, field) :: fields ->
+    let+ env = read_local
+    and+ vfield = eval_tp field in
+    D.Field (ident, vfield, D.Clo (fields, env))
 
 and eval_tp : S.tp -> D.tp EvM.m =
   let open EvM in
@@ -469,6 +508,9 @@ and eval_tp : S.tp -> D.tp EvM.m =
     let+ env = read_local
     and+ vbase = eval_tp base in
     D.Sg (vbase, ident, D.Clo (fam, env))
+  | S.Signature sign ->
+    let+ vsign = eval_sign sign in
+    D.Signature vsign
   | S.Univ ->
     ret D.Univ
   | S.El tm ->
@@ -532,7 +574,7 @@ and eval : S.t -> D.con EvM.m =
     | S.Loop tr ->
       let* r = eval_dim tr in
       begin
-        CM.test_sequent [] (Cof.boundary r) |> lift_cmp |>> function
+        CM.test_sequent [] (Cof.boundary ~dim0:Dim.Dim0 ~dim1:Dim.Dim1 r) |> lift_cmp |>> function
         | true ->
           ret D.Base
         | false ->
@@ -561,6 +603,12 @@ and eval : S.t -> D.con EvM.m =
     | S.Snd t ->
       let* con = eval t in
       lift_cmp @@ do_snd con
+    | S.Struct fields ->
+      let+ vfields = MU.map (MU.second eval) fields in
+      D.Struct vfields
+    | S.Proj (t, lbl) ->
+      let* con = eval t in
+      lift_cmp @@ do_proj con lbl
     | S.Coe (tpcode, tr, tr', tm) ->
       let* r = eval_dim tr in
       let* r' = eval_dim tr' in
@@ -628,8 +676,8 @@ and eval : S.t -> D.con EvM.m =
           D.Cof (Cof.Meet phis)
       end
     | S.ForallCof tm ->
-      let sym = Symbol.named "forall_probe" in
-      let i = Dim.DimSym sym in
+      let sym = DimProbe.fresh () in
+      let i = Dim.DimProbe sym in
       let* phi = append [D.dim_to_con i] @@ eval_cof tm in
       D.cof_to_con <@> lift_cmp @@ FaceLattice.forall sym phi
     | S.CofSplit (branches) ->
@@ -656,7 +704,12 @@ and eval : S.t -> D.con EvM.m =
       let+ vbase = eval base
       and+ vfam = eval fam in
       D.StableCode (`Sg (vbase, vfam))
-
+    | S.CodeSignature fields ->
+      let+ vfields = fields |> MU.map @@ fun (ident, tp) ->
+        let+ vtp = eval tp in
+        (ident, vtp)
+      in
+      D.StableCode (`Signature vfields)
     | S.CodeNat ->
       ret @@ D.StableCode `Nat
 
@@ -762,8 +815,8 @@ and eval_cof tphi =
 and whnf_con ~style : D.con -> D.con whnf CM.m =
   let open CM in
   function
-  | D.Lam _ | D.BindSym _ | D.Zero | D.Suc _ | D.Base | D.Pair _ | D.SubIn _ | D.ElIn _ | D.LockedPrfIn _
-  | D.Cof _ | D.Dim0 | D.Dim1 | D.Prf | D.StableCode _ ->
+  | D.Lam _ | D.BindSym _ | D.Zero | D.Suc _ | D.Base | D.Pair _ | D.Struct _ | D.SubIn _ | D.ElIn _ | D.LockedPrfIn _
+  | D.Cof _ | D.Dim0 | D.Dim1 | D.Prf | D.StableCode _ | D.DimProbe _ ->
     ret `Done
   | D.LetSym (r, x, con) ->
     reduce_to ~style @<< push_subst_con r x con
@@ -779,7 +832,7 @@ and whnf_con ~style : D.con -> D.con whnf CM.m =
     whnf_boundary ~style @@ Splice.Bdry.vin ~r ~pivot ~base
   | D.Loop r ->
     begin
-      test_sequent [] (Cof.boundary r) |>>
+      test_sequent [] (Cof.boundary ~dim0:Dim.Dim0 ~dim1:Dim.Dim1 r) |>>
       function
       | true -> ret (`Reduce D.Base)
       | false -> ret `Done
@@ -1064,6 +1117,12 @@ and inst_tm_clo : D.tm_clo -> D.con -> D.con CM.m =
     CM.lift_ev {env with conenv = Snoc (env.conenv, x)} @@
     eval bdy
 
+and inst_sign_clo : D.sign_clo -> D.con -> D.sign CM.m =
+  fun clo x ->
+  match clo with
+  | D.Clo (sign, env) ->
+    CM.lift_ev {env with conenv = Snoc (env.conenv, x)} @@ eval_sign sign
+
 (* reduces a constructor to something that is stable to pattern match on *)
 and whnf_inspect_con ~style con =
   let open CM in
@@ -1106,6 +1165,7 @@ and do_fst con : D.con CM.m =
       throw @@ NbeFailed "Couldn't fst argument in do_fst"
   end
 
+
 and do_snd con : D.con CM.m =
   let open CM in
   abort_if_inconsistent (ret D.tm_abort) @@
@@ -1126,6 +1186,44 @@ and do_snd con : D.con CM.m =
       throw @@ NbeFailed ("Couldn't snd argument in do_snd")
   end
 
+and cut_frm_sign (cut : D.cut) (sign : D.sign) (lbl : string list) =
+  let open CM in
+  match sign with
+  | D.Field (flbl, tp, _) when equal_path flbl lbl -> ret @@ cut_frm ~tp ~cut (D.KProj lbl)
+  | D.Field (flbl, _, clo) ->
+    (* FIXME: Is this right?? *)
+    let* field = cut_frm_sign cut sign flbl in
+    let* sign = inst_sign_clo clo field in
+    cut_frm_sign cut sign lbl
+  | D.Empty ->
+    throw @@ NbeFailed ("Couldn't find field label in cut_frm_sign")
+
+and do_proj (con : D.con) (lbl : string list) : D.con CM.m =
+  let open CM in
+  abort_if_inconsistent (ret D.tm_abort) @@
+  let splitter con phis = splice_tm @@ Splice.Macro.commute_split con phis (fun tm -> TB.proj tm lbl) in
+  begin
+    inspect_con ~style:`UnfoldNone con |>>
+    function
+    | D.Struct fields ->
+      begin
+        match List.assoc_opt lbl fields with
+        | Some con -> ret con
+        | None -> throw @@ NbeFailed "Couldn't proj argument in do_proj, struct was missing field"
+      end
+    | D.Split branches ->
+      splitter con @@ List.map fst branches
+    | D.Cut {tp = D.TpSplit branches; _} as con ->
+      splitter con @@ List.map fst branches
+    | D.Cut {tp = D.Signature sign; cut} ->
+      cut_frm_sign cut sign lbl
+    | _ ->
+      throw @@ NbeFailed ("Couldn't proj argument in do_proj")
+  end
+
+and do_aps (con : D.con) (args : D.con list) : D.con CM.m =
+  let open CM in
+  MU.fold_left_m (fun arg f -> do_ap f arg) con args
 
 and do_ap2 f a b =
   let open CM in
@@ -1330,6 +1428,7 @@ and do_el : D.con -> D.tp CM.m =
       | D.StableCode code ->
         ret @@ D.ElStable code
       | _ ->
+        Format.eprintf "bad do_el: %a@." D.pp_con con;
         throw @@ NbeFailed "Invalid arguments to do_el"
     end
 
@@ -1363,6 +1462,11 @@ and unfold_el : D.con D.stable_code -> D.tp CM.m =
         Splice.term @@
         TB.sg (TB.el base) @@ fun x ->
         TB.el @@ TB.ap fam [x]
+      | `Signature fields ->
+        let (lbls, field_cons) = ListUtil.unzip fields in
+        splice_tp @@
+        Splice.cons field_cons @@ fun fields ->
+        Splice.term @@ TB.signature @@ List.map2 (fun ident fam -> (ident, fun args -> TB.el @@ TB.ap fam args)) lbls fields
 
       | `Ext (n, fam, `Global phi, bdry) ->
         splice_tp @@
@@ -1396,8 +1500,8 @@ and dispatch_rigid_coe ~style line =
       ret @@ `Unknown
   in
   let peek line =
-    let x = Symbol.fresh () in
-    go x @<< whnf_inspect_con ~style @<< do_ap line @@ D.dim_to_con @@ Dim.DimSym x |>>
+    let x = DimProbe.fresh () in
+    go x @<< whnf_inspect_con ~style @<< do_ap line @@ D.dim_to_con @@ Dim.DimProbe x |>>
     function
     | `Reduce _ | `Done as res -> ret res
     | `Unknown ->
@@ -1455,6 +1559,14 @@ and enact_rigid_coe line r r' con tag =
         Splice.dim r' @@ fun r' ->
         Splice.con con @@ fun bdy ->
         Splice.term @@ TB.Kan.coe_sg ~base_line ~fam_line ~r ~r' ~bdy
+      | `Signature fields ->
+        let (lbls, fams) = ListUtil.unzip fields in
+        splice_tm @@
+        Splice.cons (List.map (fun famx -> D.BindSym (x, famx)) fams) @@ fun fam_lines ->
+        Splice.dim r @@ fun r ->
+        Splice.dim r' @@ fun r' ->
+        Splice.con con @@ fun bdy ->
+        Splice.term @@ TB.Kan.coe_sign ~field_lines:(ListUtil.zip lbls fam_lines) ~r ~r' ~bdy
       | `Ext (n, famx, `Global cof, bdryx) ->
         splice_tm @@
         Splice.con cof @@ fun cof ->
@@ -1528,6 +1640,16 @@ and enact_rigid_hcom code r r' phi bdy tag =
         Splice.con bdy @@ fun bdy ->
         Splice.term @@
         TB.Kan.hcom_sg ~base ~fam ~r ~r' ~phi ~bdy
+      | `Signature fields ->
+        let (lbls, fams) = ListUtil.unzip fields in
+        splice_tm @@
+        Splice.cons fams @@ fun fams ->
+        Splice.dim r @@ fun r ->
+        Splice.dim r' @@ fun r' ->
+        Splice.cof phi @@ fun phi ->
+        Splice.con bdy @@ fun bdy ->
+        Splice.term @@
+        TB.Kan.hcom_sign ~fields:(ListUtil.zip lbls fams) ~r ~r' ~phi ~bdy
       | `Ext (n, fam, `Global cof, bdry) ->
         splice_tm @@
         Splice.con cof @@ fun cof ->
@@ -1654,6 +1776,7 @@ and do_frm con =
   | D.KAp (_, con') -> do_ap con con'
   | D.KFst -> do_fst con
   | D.KSnd -> do_snd con
+  | D.KProj lbl -> do_proj con lbl
   | D.KNatElim (mot, case_zero, case_suc) -> do_nat_elim mot case_zero case_suc con
   | D.KCircleElim (mot, case_base, case_loop) -> do_circle_elim mot case_base case_loop con
   | D.KElOut -> do_el_out con

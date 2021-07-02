@@ -1,6 +1,8 @@
+open Basis
+open CodeUnit
+
 module D = Domain
 module S = Syntax
-open Basis
 
 include RefineErrorData.Data
 
@@ -16,6 +18,8 @@ let pp_connective fmt =
     Format.fprintf fmt "pi"
   | `Sg ->
     Format.fprintf fmt "sg"
+  | `Signature ->
+    Format.fprintf fmt "sig"
   | `Univ ->
     Format.fprintf fmt "univ"
   | `Nat ->
@@ -34,6 +38,12 @@ let pp_connective fmt =
     Format.fprintf fmt "V"
   | `ElHCom ->
     Format.fprintf fmt "hcom"
+
+let pp_path fmt p =
+  Uuseg_string.pp_utf_8 fmt @@
+  match p with
+  | [] -> "."
+  | _ -> String.concat "." p
 
 let pp fmt =
   function
@@ -62,6 +72,10 @@ let pp fmt =
     Fmt.fprintf fmt
       "Expected true cofibration: %a"
       (S.pp ppenv) cof
+  | ExpectedField (ppenv, sign, tm, lbl) ->
+    Fmt.fprintf fmt "Expected (%a : sig %a) to have field %a" (S.pp ppenv) tm (S.pp_sign ppenv) sign pp_path lbl
+  | FieldNameMismatches (expected, actual) ->
+    Fmt.fprintf fmt "Field names mismatch, expected [%a] but got [%a]" (Pp.pp_sep_list pp_path) expected (Pp.pp_sep_list pp_path) actual
   | VirtualType ->
     Fmt.fprintf fmt "Virtual type (dim, cof, etc.) cannot appear in this position"
   | HoleNotPermitted (ppenv, tp) ->

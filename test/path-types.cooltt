@@ -2,7 +2,7 @@ def formation : {
   (A : 𝕀 → type) (a : A 0) (b : A 1) → type
 } := {
   A a b =>
-  ext i => A i with [ i=0 => a | i=1 => b]
+  ext i => A i with [i=0 => a | i=1 => b]
 }
 
 normalize formation
@@ -21,7 +21,7 @@ def myrefl : {
 normalize myrefl
 
 def funext : {
-  (A : type) (B : type) (f : (x : A) → B) (g : (x : A) → B)
+  (A B : type) (f : (x : A) → B) (g : (x : A) → B)
   (h : (x : A) → path B {f x} {g x})
   → path {(x : A) → B} f g
 } := {
@@ -31,8 +31,18 @@ def funext : {
 
 normalize funext
 
+def funextdep : {
+  (A : 𝕀 → type) (B : (i : 𝕀) → A i → type)
+  (f : (i : 𝕀) → [∂ i] → (x : A i) → B i x)
+  (h : (p : (i : 𝕀) → A i) → ext i => B i {p i} with [∂ i => f i _ {p i}])
+  → ext i => (x : A i) → B i x with [∂ i => f i _]
+} := {
+  A B f h i x =>
+  h {j => coe A i j x} i
+}
+
 def pairext : {
-  (A : type) (B : type) (p : (x : A) × B) (q : (x : A) × B)
+  (A B : type) (p : (x : A) × B) (q : (x : A) × B)
   (h : (x : path A {fst p} {fst q}) × path B {snd p} {snd q})
   → path {(x : A) × B} p q
 } := {

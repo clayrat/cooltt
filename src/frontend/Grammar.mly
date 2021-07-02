@@ -5,27 +5,33 @@
   let locate (start, stop) node =
     {node; info = Some {start; stop}}
 
-  let atom_as_name a = `User a
+  let name_of_atoms parts = `User parts
 
-  let underscore_as_name = `Anon
+  let name_of_underscore = `Anon
 
-  let plain_name_to_term =
+  let plain_term_of_name =
     function
     | `User a -> Var (`User a)
     | `Anon -> Underscore
     | `Machine _ -> failwith "Impossible Internal Error"
 
-  let name_to_term {node; info} =
-    {node = plain_name_to_term node; info}
+  let term_of_name {node; info} =
+    {node = plain_term_of_name node; info}
 
-  let forget_location {node; info = _} = node
+  let drop_location {node; info = _} = node
+
+  let ap_or_atomic =
+    function
+    | [] -> failwith "Impossible Internal Error"
+    | [f] -> drop_location f
+    | f :: args -> Ap (f, args)
 %}
 
 %token <int> NUMERAL
 %token <string> ATOM
 %token <string option> HOLE_NAME
 %token LOCKED UNLOCK
-%token COLON COLON_EQUALS PIPE COMMA SEMI RIGHT_ARROW RRIGHT_ARROW UNDERSCORE DIM COF BOUNDARY
+%token BANG COLON COLON_EQUALS PIPE COMMA DOT SEMI RIGHT_ARROW RRIGHT_ARROW UNDERSCORE DIM COF BOUNDARY
 %token LPR RPR LBR RBR LSQ RSQ
 %token EQUALS JOIN MEET
 %token TYPE
@@ -33,28 +39,29 @@
 %token LET IN SUB
 %token SUC NAT ZERO UNFOLD GENERALIZE WITH
 %token CIRCLE BASE LOOP
+%token SIG STRUCT PROJ
 %token EXT
 %token COE COM HCOM HFILL
 %token QUIT NORMALIZE PRINT DEF AXIOM
+%token <string list> IMPORT
 %token ELIM
 %token SEMISEMI EOF
 %token TOPC BOTC
 %token V VPROJ CAP
 
-%nonassoc IN RRIGHT_ARROW
+%nonassoc IN RRIGHT_ARROW SEMI
 %nonassoc COLON
-%right SEMI
-%nonassoc SUC LOOP RIGHT_ARROW TIMES
+%left PROJ
+%right RIGHT_ARROW TIMES
 
 %start <ConcreteSyntax.signature> sign
 %start <ConcreteSyntax.command> command
-%type <Ident.t> plain_name name
+%type <Ident.t> plain_name
 %type <con_>
   plain_atomic_in_cof_except_term
   plain_cof_except_term
   plain_atomic_term_except_name
   bracketed
-  plain_spine
   plain_lambda_except_cof_case
   plain_term_except_cof_case
 %type <pat> pat
@@ -68,19 +75,52 @@ located(X):
   | e = X
     { locate $loc e }
 
+reversed_list_left_recursive(X):
+  | {[]}
+  | xs = reversed_list_left_recursive(X) x = X {x::xs}
+
+%inline list_left_recursive(X):
+  | xs = rev(reversed_list_left_recursive(X)) {xs}
+
+reversed_nonempty_list_left_recursive(X):
+  | x = X {[x]}
+  | xs = reversed_nonempty_list_left_recursive(X) x = X {x::xs}
+
+%inline nonempty_list_left_recursive(X):
+  | xs = rev(reversed_nonempty_list_left_recursive(X)) {xs}
+
+reversed_separated_list_left_recursive(S,X):
+  | {[]}
+  | xs = reversed_separated_list_left_recursive(S,X) S x = X {x::xs}
+
+%inline separated_list_left_recursive(S,X):
+  | xs = rev(reversed_separated_list_left_recursive(S,X)) {xs}
+
+reversed_separated_nonempty_list_left_recursive(S,X):
+  | x = X {[x]}
+  | xs = reversed_separated_nonempty_list_left_recursive(S,X) S x = X {x::xs}
+
+%inline separated_nonempty_list_left_recursive(S,X):
+  | xs = rev(reversed_separated_nonempty_list_left_recursive(S,X)) {xs}
+
 term: t = located(plain_term) {t}
 atomic_in_cof: t = located(plain_atomic_in_cof) {t}
 %inline
 name: t = located(plain_name) {t}
+bracketed_modifier: t = located(plain_bracketed_modifier) {t}
+modifier: t = located(plain_modifier) {t}
 atomic_term_except_name: t = located(plain_atomic_term_except_name) {t}
 atomic_term: t = located(plain_atomic_term) {t}
-spine: t = located(plain_spine) {t}
+
+%inline path:
+  | path = separated_nonempty_list_left_recursive(DOT, ATOM)
+    { path }
 
 plain_name:
-  | s = ATOM
-    { atom_as_name s }
+  | path = path
+    { name_of_atoms path }
   | UNDERSCORE
-    { underscore_as_name }
+    { name_of_underscore }
 
 decl:
   | DEF; nm = plain_name; tele = list(tele_cell); COLON; tp = term; COLON_EQUALS; body = term
@@ -91,6 +131,8 @@ decl:
     { Quit }
   | NORMALIZE; tm = term
     { NormalizeTerm tm }
+  | unitpath = IMPORT; m = ioption(bracketed_modifier)
+    { Import (unitpath, m) }
   | PRINT; name = name
     { Print name }
 
@@ -109,6 +151,36 @@ command:
     { NoOp }
   | d = decl; SEMISEMI
     { Decl d }
+
+plain_bracketed_modifier:
+  | LSQ list = separated_list(SEMI, modifier) RSQ
+    { ModSeq list }
+  | LBR list = separated_list(COMMA, modifier) RBR
+    { ModUnion list }
+
+plain_modifier:
+  | DOT
+    { ModAny }
+  | path = path DOT m = bracketed_modifier
+    { ModInSubtree (path, m) }
+  | RIGHT_ARROW
+    { ModRename ([], []) }
+  | path = path RIGHT_ARROW ioption(DOT)
+    { ModRename (path, []) }
+  | ioption(DOT) RIGHT_ARROW path = path
+    { ModRename ([], path) }
+  | path1 = path RIGHT_ARROW path2 = path
+    { ModRename (path1, path2) }
+  | path = path
+    { ModOnly path }
+  | BANG ioption(DOT)
+    { ModNone }
+  | BANG path = path
+    { ModExcept path }
+  | name = HOLE_NAME
+    { ModPrint name }
+  | m = plain_bracketed_modifier
+    { m }
 
 plain_atomic_in_cof_except_term:
   | BOUNDARY t = atomic_term
@@ -181,18 +253,8 @@ bracketed:
 
 plain_atomic_term:
   | name = plain_name
-    { plain_name_to_term name }
+    { plain_term_of_name name }
   | t = plain_atomic_term_except_name
-    { t }
-
-plain_spine:
-  | spine = nonempty_list(name); arg = atomic_term_except_name; args = list(atomic_term)
-    { Ap (name_to_term (List.hd spine), List.map name_to_term (List.tl spine) @ [arg] @ args) }
-  | f = atomic_term_except_name; args = nonempty_list(atomic_term)
-    { Ap (f, args) }
-  | f = name; args = nonempty_list(name)
-    { Ap (name_to_term f, List.map name_to_term args) }
-  | t = plain_atomic_term
     { t }
 
 plain_lambda_and_cof_case:
@@ -200,18 +262,20 @@ plain_lambda_and_cof_case:
     { name, body }
 
 plain_lambda_except_cof_case:
-  | name1 = name; names2 = nonempty_list(plain_name); RRIGHT_ARROW; body = term
-    { Lam (forget_location name1 :: names2, body) }
+  | names1 = nonempty_list_left_recursive(name); name2 = plain_name; RRIGHT_ARROW; body = term
+  { Lam (List.map drop_location names1 @ [name2], body) }
 
 plain_term:
   | t = plain_lambda_and_cof_case
-    { let name, body = t in Lam ([forget_location name], body)  }
+    { let name, body = t in Lam ([drop_location name], body)  }
   | t = plain_term_except_cof_case
     { t }
 
 plain_term_except_cof_case:
-  | t = plain_spine
-    { t }
+  | spine = ioption(nonempty_list_left_recursive(name)); arg1 = atomic_term_except_name; args2 = list(atomic_term)
+    { ap_or_atomic (List.concat [List.map term_of_name @@ Option.value ~default:[] spine; [arg1]; args2]) }
+  | spine = nonempty_list_left_recursive(name)
+    { ap_or_atomic (List.map term_of_name spine) }
   | UNLOCK; t = term; IN; body = term;
     { Unlock (t, body) }
   | UNFOLD; names = nonempty_list(plain_name); IN; body = term;
@@ -226,9 +290,9 @@ plain_term_except_cof_case:
     { Ann {term = t; tp} }
   | LOCKED; phi = atomic_term
     { Locked phi }
-  | SUC; t = term
+  | SUC; t = atomic_term
     { Suc t }
-  | LOOP; t = term
+  | LOOP; t = atomic_term
     { Loop t }
   | t = plain_lambda_except_cof_case
     { t }
@@ -238,10 +302,16 @@ plain_term_except_cof_case:
     { Pi (tele, cod) }
   | tele = nonempty_list(tele_cell); TIMES; cod = term
     { Sg (tele, cod) }
-  | dom = spine; RIGHT_ARROW; cod = term
-    { Pi ([Cell {name = `Anon; tp = dom}], cod) }
-  | dom = spine; TIMES; cod = term
-    { Sg ([Cell {name = `Anon; tp = dom}], cod) }
+  | SIG; tele = list(field);
+    { Signature tele }
+  | STRUCT; tele = list(field);
+    { Struct tele }
+  | t = term; PROJ; lbl = path
+    { Proj (t, lbl) }
+  | dom = term; RIGHT_ARROW; cod = term
+    { Pi ([Cell {names = [`Anon]; tp = dom}], cod) }
+  | dom = term; TIMES; cod = term
+    { Sg ([Cell {names = [`Anon]; tp = dom}], cod) }
   | SUB; tp = atomic_term; phi = atomic_term; tm = atomic_term
     { Sub (tp, phi, tm) }
   | FST; t = atomic_term
@@ -270,7 +340,7 @@ plain_term_except_cof_case:
     { Com (fam, src, trg, phi, body) }
 
 cases:
-  | LSQ option(PIPE) cases = separated_list(PIPE, case) RSQ
+  | LSQ ioption(PIPE) cases = separated_list(PIPE, case) RSQ
     { cases }
 
 case:
@@ -279,20 +349,20 @@ case:
 
 cof_case:
   | t = plain_lambda_and_cof_case
-    { let name, body = t in name_to_term name, body }
+    { let name, body = t in term_of_name name, body }
   | phi = located(plain_cof_or_atomic_term_except_name) RRIGHT_ARROW t = term
     { phi, t }
 
 pat_lbl:
   | ZERO
-    { "zero" }
+    { ["zero"] }
   | SUC
-    { "suc" }
+    { ["suc"] }
   | BASE
-    { "base" }
+    { ["base"] }
   | LOOP
-    { "loop" }
-  | lbl = ATOM
+    { ["loop"] }
+  | lbl = path
     { lbl }
 
 
@@ -306,6 +376,10 @@ pat_arg:
   | LBR i0 = plain_name RRIGHT_ARROW i1 = plain_name RBR
     { `Inductive (i0, i1) }
 
+field:
+  | LPR lbl = path; COLON tp = term; RPR
+    { Field {lbl; tp} }
+
 tele_cell:
-  | LPR name = plain_name; COLON tp = term; RPR
-    { Cell {name; tp} }
+  | LPR names = nonempty_list(plain_name); COLON tp = term; RPR
+    { Cell {names; tp} }

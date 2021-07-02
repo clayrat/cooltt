@@ -1,3 +1,11 @@
+open Containers
+
+open Basis
+open Monads
+open Bwd
+
+open CodeUnit
+
 module D = Domain
 module S = Syntax
 module Env = RefineEnv
@@ -9,15 +17,17 @@ module TB = TermBuilder
 module Sem = Semantics
 module Qu = Quote
 
-exception CJHM
-
-open Basis
-open Monads
 open Monad.Notation (RM)
 module MU = Monad.Util (RM)
-open Bwd
+
+exception CJHM
+
 
 type ('a, 'b) quantifier = 'a -> Ident.t * (T.var -> 'b) -> 'b
+
+type 'a telescope =
+  | Bind of string list * 'a * (T.var -> 'a telescope)
+  | Done
 
 module GlobalUtil : sig
   val destruct_cells : Env.cell list -> (Ident.t * S.tp) list m
@@ -54,11 +64,42 @@ struct
 end
 
 
+module Probe : sig
+  val probe_chk : string option -> T.Chk.tac -> T.Chk.tac
+  val probe_syn : string option -> T.Syn.tac -> T.Syn.tac
+end =
+struct
+  let print_state lbl tp : unit m =
+    let* env = RM.read in
+    let cells = Env.locals env in
+
+    RM.globally @@
+    let* ctx = GlobalUtil.destruct_cells @@ Bwd.to_list cells in
+    () |> RM.emit (RefineEnv.location env) @@ fun fmt () ->
+    Format.fprintf fmt "Emitted hole:@,  @[<v>%a@]@." (S.pp_sequent ~lbl ctx) tp
+
+  let probe_chk name tac =
+    T.Chk.brule @@ fun (tp, phi, clo) ->
+    let* s = T.Chk.brun tac (tp, phi, clo) in
+    let+ () =
+      let* stp = RM.quote_tp @@ D.Sub (tp, phi, clo) in
+      print_state name stp
+    in
+    s
+
+  let probe_syn name tac =
+    T.Syn.rule @@
+    let* s, tp = T.Syn.run tac in
+    let+ () =
+      let* stp = RM.quote_tp tp in
+      print_state name stp
+    in
+    s, tp
+end
+
+
 module Hole : sig
-  val run_chk_and_print_state : string option -> T.Chk.tac -> T.Chk.tac
-  val run_syn_and_print_state : string option -> T.Syn.tac -> T.Syn.tac
   val unleash_hole : string option -> T.Chk.tac
-  val unleash_tp_hole : string option -> T.Tp.tac
   val unleash_syn_hole : string option -> T.Syn.tac
 end =
 struct
@@ -70,33 +111,6 @@ struct
       RM.with_pp @@ fun ppenv ->
       RM.refine_err @@ Err.HoleNotPermitted (ppenv, ttp)
     | _ -> RM.ret ()
-
-  let print_state lbl tp : unit m =
-    let* env = RM.read in
-    let cells = Env.locals env in
-
-    RM.globally @@
-    let* ctx = GlobalUtil.destruct_cells @@ Bwd.to_list cells in
-    () |> RM.emit (RefineEnv.location env) @@ fun fmt () ->
-    Format.fprintf fmt "Emitted hole:@,  @[<v>%a@]@." (S.pp_sequent ~lbl ctx) tp
-
-  let run_chk_and_print_state name tac =
-    T.Chk.brule @@ fun (tp, phi, clo) ->
-    let* s = T.Chk.brun tac (tp, phi, clo) in
-    let+ () =
-      let* stp = RM.quote_tp @@ D.Sub (tp, phi, clo) in
-      print_state name stp
-    in
-    s
-
-  let run_syn_and_print_state name tac =
-    T.Syn.rule @@
-    let* s, tp = T.Syn.run tac in
-    let+ () =
-      let* stp = RM.quote_tp tp in
-      print_state name stp
-    in
-    s, tp
 
   let make_hole name (tp, phi, clo) : D.cut m =
     let* () = assert_hole_possible tp in
@@ -119,16 +133,13 @@ struct
     RM.ret (D.UnstableCut (cut, D.KSubOut (phi, clo)), [])
 
   let unleash_hole name : T.Chk.tac =
+    Probe.probe_chk name @@
     T.Chk.brule @@ fun (tp, phi, clo) ->
     let* cut = make_hole name (tp, phi, clo) in
     RM.quote_cut cut
 
-  let unleash_tp_hole name : T.Tp.tac =
-    T.Tp.rule @@
-    let* cut = make_hole name @@ (D.Univ, Cubical.Cof.bot, D.Clo (S.tm_abort, {tpenv = Emp; conenv = Emp})) in
-    RM.quote_tp @@ D.ElCut cut
-
   let unleash_syn_hole name : T.Syn.tac =
+    Probe.probe_syn name @@
     T.Syn.rule @@
     let* cut = make_hole name @@ (D.Univ, Cubical.Cof.bot, D.Clo (S.tm_abort, {tpenv = Emp; conenv = Emp})) in
     let tp = D.ElCut cut in
@@ -479,6 +490,80 @@ struct
 end
 
 
+module Signature =
+struct
+  let equal_path p1 p2 =
+    List.equal String.equal p1 p2
+
+  let hole_name_of_path =
+    function
+    | [] -> None
+    | p -> Some (String.concat "." p)
+
+  let formation (tacs : T.Tp.tac telescope) : T.Tp.tac =
+    let rec form_fields tele =
+      function
+      | Bind (nm, tac, tacs) ->
+        let* tp = T.Tp.run tac in
+        let* vtp = RM.lift_ev @@ Sem.eval_tp tp in
+        T.abstract ~ident:(`User nm) vtp @@ fun var -> form_fields (Snoc (tele, (nm, tp))) (tacs var)
+      | Done -> RM.ret @@ S.Signature (Bwd.to_list tele)
+    in T.Tp.rule @@ form_fields Emp tacs
+
+  let rec find_field_tac (lbl : string list) (fields : (string list * T.Chk.tac) list) : T.Chk.tac option =
+    match fields with
+    | (lbl', tac) :: _ when equal_path (lbl : string list) lbl'  ->
+      Some tac
+    | _ :: fields ->
+      find_field_tac lbl fields
+    | [] ->
+      None
+
+
+  let rec intro_fields phi phi_clo (sign : D.sign) (tacs : (string list * T.Chk.tac) list) : (string list * S.t) list m =
+    match sign with
+    | D.Field (lbl, tp, sign_clo) ->
+      let tac =
+        match find_field_tac lbl tacs with
+        | Some tac -> tac
+        | None -> Hole.unleash_hole (hole_name_of_path lbl)
+      in
+      let* tfield = T.Chk.brun tac (tp, phi, D.un_lam @@ D.compose (D.proj lbl) @@ D.Lam (`Anon, phi_clo)) in
+      let* vfield = RM.lift_ev @@ Sem.eval tfield in
+      let* tsign = RM.lift_cmp @@ Sem.inst_sign_clo sign_clo vfield in
+      let+ tfields = intro_fields phi phi_clo tsign tacs in
+      (lbl, tfield) :: tfields
+    | D.Empty ->
+      RM.ret []
+
+  let intro (tacs : (string list * T.Chk.tac) list) : T.Chk.tac =
+    T.Chk.brule @@
+    function
+    | (D.Signature sign, phi, phi_clo) ->
+      let+ fields = intro_fields phi phi_clo sign tacs in
+      S.Struct fields
+    | (tp, _, _) -> RM.expected_connective `Signature tp
+
+  let proj_tp (sign : D.sign) (tstruct : S.t) (lbl : string list) : D.tp m =
+    let rec go =
+      function
+      | D.Field (flbl, tp, _) when equal_path flbl lbl -> RM.ret tp
+      | D.Field (flbl, __, clo) ->
+        let* vfield = RM.lift_ev @@ Sem.eval @@ S.Proj (tstruct, flbl) in
+        let* vsign = RM.lift_cmp @@ Sem.inst_sign_clo clo vfield in
+        go vsign
+      | D.Empty -> RM.expected_field sign tstruct lbl
+    in go sign
+
+  let proj tac lbl : T.Syn.tac =
+    T.Syn.rule @@
+    let* tstruct, tp = T.Syn.run tac in
+    match tp with
+    | D.Signature sign ->
+      let+ tp = proj_tp sign tstruct lbl in
+      S.Proj (tstruct, lbl), tp
+    | _ -> RM.expected_connective `Signature tp
+end
 
 module Univ =
 struct
@@ -519,6 +604,26 @@ struct
     let+ fam = T.Chk.run tac_fam famtp in
     base, fam
 
+  let quantifiers (tacs : (string list * T.Chk.tac) list) univ : (string list * S.t) list m =
+    let (lbls, tacs) = ListUtil.unzip tacs in
+    let idents = List.map (fun lbl -> `User lbl) lbls in
+    let rec mk_fams fams vfams =
+      function
+      | [] -> RM.ret fams
+      | tac :: tacs ->
+        let* famtp =
+          RM.lift_cmp @@
+          Sem.splice_tp @@
+          Splice.tp univ @@ fun univ ->
+          Splice.cons vfams @@ fun args -> Splice.term @@ TB.pis ~idents:idents args @@ fun _ -> univ
+        in
+        let* fam = T.Chk.run tac famtp in
+        let* vfam = RM.lift_ev @@ Sem.eval fam in
+        mk_fams (fams @ [fam]) (vfams @ [vfam]) tacs
+    in
+    let+ fams = mk_fams [] [] tacs in
+    ListUtil.zip lbls fams
+
   let pi tac_base tac_fam : T.Chk.tac =
     univ_tac @@ fun univ ->
     let+ tp, fam = quantifier tac_base tac_fam univ in
@@ -529,6 +634,28 @@ struct
     let+ tp, fam = quantifier tac_base tac_fam univ in
     S.CodeSg (tp, fam)
 
+  (* [NOTE: Sig Code Quantifiers]
+     When we are creating a code for a signature, we need to make sure
+     that we can depend on the values of previous fields. To achieve this,
+     we do something similar to pi/sigma codes, and add in extra pi types to
+     bind the names of previous fields. As an example, the signature:
+         sig (x : type)
+             (y : (arg : x) -> type)
+             (z : (arg1 : x) -> (arg2 : y) -> type)
+     will produce the following goals:
+          type
+          (x : type) -> type
+          (x : type) -> (y : type) -> type
+     and once the tactics for each field are run, we will get the following
+     signature code (notice the lambdas!):
+         sig (x : type)
+             (y : x => (arg : x) -> type)
+             (z : x => y => (arg1 : x) -> (arg2 : y) -> type)
+  *)
+  let signature (tacs : (string list * T.Chk.tac) list) : T.Chk.tac =
+    univ_tac @@ fun univ ->
+    let+ fields = quantifiers tacs univ in
+    S.CodeSignature fields
 
   let ext (n : int) (tac_fam : T.Chk.tac) (tac_cof : T.Chk.tac) (tac_bdry : T.Chk.tac) : T.Chk.tac =
     univ_tac @@ fun univ ->
@@ -894,7 +1021,7 @@ struct
         RM.lift_ev @@ Sem.eval_tp tp
       in
       let* def =
-        let prefix = ListUtil.take lvl cells_fwd in
+        let prefix = List.take lvl cells_fwd in
         let* tm = global_tp |> T.Chk.run @@ intros prefix tac in
         RM.lift_ev @@ Sem.eval tm
       in

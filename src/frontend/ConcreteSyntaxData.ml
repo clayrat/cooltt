@@ -17,7 +17,7 @@ type 'a node =
 [@@deriving show]
 
 
-type cell = Cell of {name : Ident.t; tp : con}
+type cell = Cell of {names : Ident.t list; tp : con}
 and con = con_ node
 and con_ =
   | Var of Ident.t
@@ -34,6 +34,9 @@ and con_ =
   | Lam of Ident.t list * con
   | Ap of con * con list
   | Sg of cell list * con
+  | Signature of field list
+  | Struct of field list
+  | Proj of con * string list
   | Sub of con * con * con
   | Pair of con * con
   | Fst of con
@@ -66,12 +69,24 @@ and con_ =
   | Cap of con
   | Locked of con
   | Unlock of con * con
+  | ModAny
+  | ModOnly of string list
+  | ModRename of string list * string list
+  | ModNone
+  | ModExcept of string list
+  | ModSeq of con list
+  | ModUnion of con list
+  | ModInSubtree of string list * con
+  | ModPrint of string option
 [@@deriving show]
 
 and case = pat * con
 [@@deriving show]
 
-and pat = Pat of {lbl : string; args : pat_arg list}
+and field = Field of { lbl : string list; tp : con }
+[@@deriving show]
+
+and pat = Pat of {lbl : string list; args : pat_arg list}
 [@@deriving show]
 
 and pat_arg = [`Simple of Ident.t | `Inductive of Ident.t * Ident.t]
@@ -80,6 +95,7 @@ and pat_arg = [`Simple of Ident.t | `Inductive of Ident.t * Ident.t]
 type decl =
   | Def of {name : Ident.t; args : cell list; def : con option; tp : con}
   | Print of Ident.t node
+  | Import of string list * con option
   | NormalizeTerm of con
   | Quit
 
